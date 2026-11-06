@@ -3,6 +3,47 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.4.3] - 2026-10-12
+
+- [**SEC**] Fix potential buffer overflow in Record&Play plugin (reported by AdamKorcz) [[PR-3688](https://github.com/meetecho/janus-gateway/pull/3688)]
+- [**SEC**] Fix master/helper session switch potentially causing a crash in SIP plugin (reported by AdamKorcz) [[PR-3689](https://github.com/meetecho/janus-gateway/pull/3689)]
+- Keep DTLS retransmission timer running after handshake (thanks @fippo!) [[PR-3687](https://github.com/meetecho/janus-gateway/pull/3687)]
+- Enable TWCC feedback for audio-only connections (thanks @SteveMcFarlin!) [[PR-3674](https://github.com/meetecho/janus-gateway/pull/3674)]
+- Avoid discarding NACKs with duplicate queue pops (thanks @chriswiggins!) [[PR-3684](https://github.com/meetecho/janus-gateway/pull/3684)]
+- Added new option to restrict "info" API when using secrets or tokens (thanks @ EricLi-400!) [[PR-3646](https://github.com/meetecho/janus-gateway/pull/3646)]
+- Add optional AudioBridge audio limiter based on AGC2 (thanks @m08pvv!) [[PR-3593](https://github.com/meetecho/janus-gateway/pull/3593)]
+- Add support for outgoing late offers (offerless INVITE) to the SIP plugin [[PR-3660](https://github.com/meetecho/janus-gateway/pull/3660)]
+- Fixed contact header sometimes missing in REFER messages in the SIP plugin
+- Other smaller fixes and improvements (thanks to all who contributed pull requests and reported issues!)
+
+## [v1.4.2] - 2026-09-23
+
+- [**SEC**] Updated security policy document and added security advisories
+- [**SEC**] Fix AudioBridge recordings bypassing protected folders (reported by Calif.io) [[PR-3676](https://github.com/meetecho/janus-gateway/pull/3676)]
+- [**SEC**] Fix missing protocol allowlist when using libcurl in Streaming/TextRoom plugins (reported by Calif.io) [[PR-3677](https://github.com/meetecho/janus-gateway/pull/3677)]
+- [**SEC**] Better enforcement of max publishers in VideoRoom (reported via VulDB) [[PR-3678](https://github.com/meetecho/janus-gateway/pull/3678)]
+- [**SEC**] Validate list of usernames in TextRoom batch message (reported by Hama1cco) [[PR-3679](https://github.com/meetecho/janus-gateway/pull/3679)]
+- [**SEC**] Use size_t in the strings replace helper (reported by Hama1cco) [[PR-3680](https://github.com/meetecho/janus-gateway/pull/3680)]
+- [**SEC**] Fix removal from wrong hashtable in SIP and NoSIP plugins (reported by Hama1cco!) [[PR-3681](https://github.com/meetecho/janus-gateway/pull/3681)]
+- [**SEC**] Add cap to helper threads in Streaming and VideoRoom plugins (reported by Hama1cco) [[PR-3682](https://github.com/meetecho/janus-gateway/pull/3682)]
+- Reverse the order of SSRC checks when receiving RTCP [[PR-3642](https://github.com/meetecho/janus-gateway/pull/3642)]
+- Fix incorrect reference start time for reclaiming session timeout [[PR-3643](https://github.com/meetecho/janus-gateway/pull/3643)]
+- Reset file any time a new pcap is started, instead of appending
+- Add optional per-handle ICE port range (thanks @Odinvt!) [[PR-3651](https://github.com/meetecho/janus-gateway/pull/3651)]
+- Don't dispose the current agent in the async close callback (thanks @denedenesdenes!) [[PR-3666](https://github.com/meetecho/janus-gateway/pull/3666)]
+- Add support for HMAC-SHA256 when using signed tokens (thanks @mcadecio!) [[PR-3658](https://github.com/meetecho/janus-gateway/pull/3658)]
+- Fixed memory leak when using manual loop allocations (thanks @artmatsak!) [[PR-3665](https://github.com/meetecho/janus-gateway/pull/3665)]
+- Make AudioBridge participant encoder/decoder access thread-safe (thanks @woutd!) [[PR-3606](https://github.com/meetecho/janus-gateway/pull/3606)]
+- Added signed_tokens support to the AudioBridge plugin (thanks @mirkobrankovic82!) [[PR-3635](https://github.com/meetecho/janus-gateway/pull/3635)]
+- Fixed rare crash in AudioBridge plugin (thanks @spscream!) [[PR-3664](https://github.com/meetecho/janus-gateway/pull/3664)]
+- Added option to disable manual injection of SPS/PPS for RTSP servers that put them in the SDP [[PR-3655](https://github.com/meetecho/janus-gateway/pull/3655)]
+- Add support for synchronous RTP forwarder requests to SIP/NoSIP plugins [[PR-3639](https://github.com/meetecho/janus-gateway/pull/3639)]
+- Fixed one way audio after a long hold in the SIP plugin (thanks @edospadoni!) [[PR-3640](https://github.com/meetecho/janus-gateway/pull/3640)]
+- Replace sleep with gcond when creating new stack in SIP plugin (thanks @adnanel!) [[PR-3672](https://github.com/meetecho/janus-gateway/pull/3672)]
+- Fixed missing authentication on challenged REFER in SIP plugin (thanks @ mamdaarbak!) [[PR-3675](https://github.com/meetecho/janus-gateway/pull/3675)]
+- Bind the outgoing queue in the WebSocket event handler (thanks @alvm!)] [[PR-3670](https://github.com/meetecho/janus-gateway/pull/3670)]
+- Other smaller fixes and improvements (thanks to all who contributed pull requests and reported issues!)
+
 ## [v1.4.1] - 2026-04-20
 
 - Fixed a few vulnerability issues (thanks to Haruto Kimura (Stella) and Kelvin Mbogo (Add Content) for reporting them and suggesting fixes!) [[PR-3636](https://github.com/meetecho/janus-gateway/pull/3636)] [[PR-3637](https://github.com/meetecho/janus-gateway/pull/3637)]

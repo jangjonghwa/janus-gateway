@@ -1312,9 +1312,10 @@ struct janus_plugin_result *janus_textroom_handle_message(janus_plugin_session *
 		/* These requests typically only belong to the datachannel
 		 * messaging, but for admin purposes we might use them on
 		 * the Janus API as well: add the properties the datachannel
-		 * processor would expect and handle everything there */
-		if(json_object_get(root, "textroom") == NULL)
-			json_object_set_new(root, "textroom", json_string(request_text));
+		 * processor would expect and handle everything there: the
+		 * datachannel processor looks at 'textroom', so we always
+		 * set it from 'request', to only allow the requests above */
+		json_object_set_new(root, "textroom", json_string(request_text));
 		json_object_set_new(root, "transaction", json_string(transaction));
 		janus_plugin_result *result = janus_textroom_handle_incoming_request(session->handle, NULL, root, FALSE);
 		if(result == NULL) {
@@ -1391,8 +1392,8 @@ json_t *janus_textroom_handle_admin_message(json_t *message) {
 			|| !strcasecmp(request_text, "allowed")
 			|| !strcasecmp(request_text, "kick")
 			|| !strcasecmp(request_text, "destroy")) {
-		if(json_object_get(message, "textroom") == NULL)
-			json_object_set_new(message, "textroom", json_string(request_text));
+		/* Always set 'textroom' from 'request', to only allow the requests above */
+		json_object_set_new(message, "textroom", json_string(request_text));
 		janus_plugin_result *result = janus_textroom_handle_incoming_request(NULL, NULL, message, FALSE);
 		if(result == NULL) {
 			JANUS_LOG(LOG_ERR, "JSON error: not an object\n");
@@ -1578,12 +1579,29 @@ janus_plugin_result *janus_textroom_handle_incoming_request(janus_plugin_session
 		json_t *username = json_object_get(root, "to");
 		json_t *usernames = json_object_get(root, "tos");
 		if(username && usernames) {
+			janus_refcount_decrease(&participant->ref);
 			janus_mutex_unlock(&textroom->mutex);
 			janus_refcount_decrease(&textroom->ref);
 			JANUS_LOG(LOG_ERR, "Both to and tos array provided\n");
 			error_code = JANUS_TEXTROOM_ERROR_INVALID_ELEMENT;
 			g_snprintf(error_cause, 512, "Both to and tos array provided");
 			goto msg_response;
+		}
+		if(usernames) {
+			/* Make sure we got strings */
+			size_t i = 0;
+			for(i=0; i<json_array_size(usernames); i++) {
+				json_t *u = json_array_get(usernames, i);
+				if(u == NULL || json_is_null(u) || !json_is_string(u)) {
+					janus_refcount_decrease(&participant->ref);
+					janus_mutex_unlock(&textroom->mutex);
+					janus_refcount_decrease(&textroom->ref);
+					JANUS_LOG(LOG_ERR, "Invalid tos provided\n");
+					error_code = JANUS_TEXTROOM_ERROR_INVALID_ELEMENT;
+					g_snprintf(error_cause, 512, "Invalid tos provided");
+					goto msg_response;
+				}
+			}
 		}
 		json_t *text = json_object_get(root, "text");
 		const char *message = json_string_value(text);
@@ -1693,6 +1711,18 @@ janus_plugin_result *janus_textroom_handle_incoming_request(janus_plugin_session
 					JANUS_LOG(LOG_ERR, "Error initializing CURL context\n");
 				} else {
 					curl_easy_setopt(curl, CURLOPT_URL, textroom->http_backend);
+					/* The backend URL comes straight from the plugin API: restrict libcurl to
+					 * the protocols this feature is documented to use, so that a room owner
+					 * cannot turn the callback into gopher://, file://, ftp://, ... */
+#if CURL_AT_LEAST_VERSION(7, 85, 0)
+					curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+					curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+					curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+					curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
+					curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+					curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
 					struct curl_slist *headers = NULL;
 					headers = curl_slist_append(headers, "Accept: application/json");
 					headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -1718,9 +1748,10 @@ janus_plugin_result *janus_textroom_handle_incoming_request(janus_plugin_session
 		janus_mutex_unlock(&textroom->mutex);
 		janus_refcount_decrease(&textroom->ref);
 		/* By default we send a confirmation back to the user that sent this message:
-		 * if the user passed an ack=false, though, we don't do that */
+		 * if the user passed an ack=false, though, we don't do that (but
+		 * only on data channels, as Janus API requests always get a response) */
 		json_t *ack = json_object_get(root, "ack");
-		if(!internal && (ack == NULL || json_is_true(ack))) {
+		if(!internal && (json != NULL || ack == NULL || json_is_true(ack))) {
 			/* Send response back */
 		} else {
 			internal = TRUE;
@@ -2461,6 +2492,18 @@ janus_plugin_result *janus_textroom_handle_incoming_request(janus_plugin_session
 				JANUS_LOG(LOG_ERR, "Error initializing CURL context\n");
 			} else {
 				curl_easy_setopt(curl, CURLOPT_URL, textroom->http_backend);
+				/* The backend URL comes straight from the plugin API: restrict libcurl to
+				 * the protocols this feature is documented to use, so that a room owner
+				 * cannot turn the callback into gopher://, file://, ftp://, ... */
+#if CURL_AT_LEAST_VERSION(7, 85, 0)
+				curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+				curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+				curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+				curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
+				curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+				curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
 				struct curl_slist *headers = NULL;
 				headers = curl_slist_append(headers, "Accept: application/json");
 				headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -2697,7 +2740,7 @@ janus_plugin_result *janus_textroom_handle_incoming_request(janus_plugin_session
 			reply = json_object();
 			/* Notice that we reply differently if the request came via Janus API */
 			json_object_set_new(reply, "textroom", json_string(json == NULL ? "success" : "created"));
-			json_object_set_new(reply, "room", string_ids ? json_string(textroom->room_id_str) : json_integer(textroom->room_id));
+			json_object_set_new(reply, "room", string_ids ? json_string(room_id_str) : json_integer(room_id));
 			json_object_set_new(reply, "permanent", save ? json_true() : json_false());
 		}
 		/* Also notify event handlers */
@@ -3042,7 +3085,9 @@ msg_response:
 					return janus_plugin_result_new(JANUS_PLUGIN_OK, NULL, reply);
 				}
 			}
-			if(root != NULL)
+			/* We only own the request if we parsed it ourselves: when it
+			 * was passed to us as an object, the caller releases it */
+			if(root != NULL && json == NULL)
 				json_decref(root);
 		}
 	return NULL;

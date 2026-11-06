@@ -2307,6 +2307,9 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data);
 static void janus_videoroom_relay_data_packet(gpointer data, gpointer user_data);
 static void janus_videoroom_hangup_media_internal(gpointer session_data);
 
+/* Arbitrary cap for helper threads */
+#define JANUS_VIDEOROOM_HELPER_THREADS_CAP	100
+
 typedef enum janus_videoroom_p_type {
 	janus_videoroom_p_type_none = 0,
 	janus_videoroom_p_type_subscriber,			/* Generic subscriber */
@@ -2416,6 +2419,7 @@ typedef struct janus_videoroom_session {
 	gint64 sdp_version;
 	janus_videoroom_p_type participant_type;
 	gpointer participant;
+	volatile gint starting;
 	volatile gint started;
 	volatile gint dataready;
 	volatile gint hangingup;
@@ -4099,7 +4103,7 @@ int janus_videoroom_init(janus_callbacks *callback, const char *config_path) {
 			}
 			if(threads && threads->value) {
 				int helper_threads = atoi(threads->value);
-				if(helper_threads < 0) {
+				if(helper_threads < 0 || helper_threads > JANUS_VIDEOROOM_HELPER_THREADS_CAP) {
 					JANUS_LOG(LOG_WARN, "Invalid threads configuration '%d' in room '%s', ignoring...\n", helper_threads, cat->name);
 				} else {
 					/* If we need helper threads, spawn them now */
@@ -4122,13 +4126,23 @@ int janus_videoroom_init(janus_callbacks *callback, const char *config_path) {
 							janus_refcount_increase(&helper->ref);
 							helper->thread = g_thread_try_new(tname, &janus_videoroom_helper_thread, helper, &error);
 							if(error != NULL) {
-								/* TODO Should this be a hard failure? */
+								/* Give up */
 								JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the helper thread...\n",
 									error->code, error->message ? error->message : "??");
-							} else {
-								janus_refcount_increase(&helper->ref);
-								videoroom->threads = g_list_append(videoroom->threads, helper);
+								janus_refcount_decrease(&helper->ref);
+								janus_refcount_decrease(&videoroom->ref);
+								janus_videoroom_helper_destroy(helper);
+								break;
 							}
+							janus_refcount_increase(&helper->ref);
+							videoroom->threads = g_list_append(videoroom->threads, helper);
+						}
+						if(error != NULL) {
+							/* Something went wrong, return an error */
+							janus_videoroom_room_destroy(videoroom);
+							janus_mutex_unlock(&rooms_mutex);
+							cl = cl->next;
+							continue;
 						}
 					}
 				}
@@ -4948,6 +4962,13 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			g_snprintf(error_cause, 512, "No configuration file, can't create permanent room");
 			goto prepare_response;
 		}
+		int threads_num = json_integer_value(threads);
+		if(threads_num > JANUS_VIDEOROOM_HELPER_THREADS_CAP) {
+			JANUS_LOG(LOG_ERR, "Too many helper threads requested\n");
+			error_code = JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT;
+			g_snprintf(error_cause, 512, "Too many helper threads requested");
+			goto prepare_response;
+		}
 		guint64 room_id = 0;
 		char room_id_num[30], *room_id_str = NULL;
 		json_t *room = json_object_get(root, "room");
@@ -4975,6 +4996,8 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		}
 		/* Create the room */
 		janus_videoroom *videoroom = g_malloc0(sizeof(janus_videoroom));
+		janus_mutex_init(&videoroom->mutex);
+		janus_refcount_init(&videoroom->ref, janus_videoroom_room_free);
 		/* Generate a random ID */
 		gboolean room_id_allocated = FALSE;
 		if(!string_ids && room_id == 0) {
@@ -4999,8 +5022,6 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		}
 		videoroom->room_id = room_id;
 		videoroom->room_id_str = room_id_str ? g_strdup(room_id_str) : NULL;
-		if(room_id_allocated)
-			g_free(room_id_str);
 		char *description = NULL;
 		if(desc != NULL && strlen(json_string_value(desc)) > 0) {
 			description = g_strdup(json_string_value(desc));
@@ -5039,7 +5060,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		if(fir_freq)
 			videoroom->fir_freq = json_integer_value(fir_freq);
 		/* If we need helper threads, spawn them now */
-		videoroom->helper_threads = json_integer_value(threads);;
+		videoroom->helper_threads = threads_num;
 		if(videoroom->helper_threads > 0) {
 			GError *error = NULL;
 			char tname[16];
@@ -5058,13 +5079,26 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 				janus_refcount_increase(&helper->ref);
 				helper->thread = g_thread_try_new(tname, &janus_videoroom_helper_thread, helper, &error);
 				if(error != NULL) {
-					/* TODO Should this be a hard failure? */
+					/* Give up */
 					JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the helper thread...\n",
 						error->code, error->message ? error->message : "??");
-				} else {
-					janus_refcount_increase(&helper->ref);
-					videoroom->threads = g_list_append(videoroom->threads, helper);
+					janus_refcount_decrease(&helper->ref);
+					janus_refcount_decrease(&videoroom->ref);
+					janus_videoroom_helper_destroy(helper);
+					break;
 				}
+				janus_refcount_increase(&helper->ref);
+				videoroom->threads = g_list_append(videoroom->threads, helper);
+			}
+			if(error != NULL) {
+				/* Something went wrong, return an error */
+				janus_videoroom_room_destroy(videoroom);
+				janus_mutex_unlock(&rooms_mutex);
+				if(room_id_allocated)
+					g_free(room_id_str);
+				error_code = JANUS_VIDEOROOM_ERROR_UNKNOWN_ERROR;
+				g_snprintf(error_cause, 512, "Helper threads error");
+				goto prepare_response;
 			}
 		}
 		/* By default, we force Opus as the only audio codec */
@@ -5190,8 +5224,6 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			videoroom->lock_record = json_is_true(lock_record);
 		}
 		g_atomic_int_set(&videoroom->destroyed, 0);
-		janus_mutex_init(&videoroom->mutex);
-		janus_refcount_init(&videoroom->ref, janus_videoroom_room_free);
 		videoroom->participants = g_hash_table_new_full(string_ids ? g_str_hash : g_int64_hash, string_ids ? g_str_equal : g_int64_equal,
 			(GDestroyNotify)g_free, (GDestroyNotify)janus_videoroom_publisher_dereference);
 		videoroom->private_ids = g_hash_table_new(NULL, NULL);
@@ -5361,15 +5393,17 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		/* Send info back */
 		response = json_object();
 		json_object_set_new(response, "videoroom", json_string("created"));
-		json_object_set_new(response, "room", string_ids ? json_string(videoroom->room_id_str) : json_integer(videoroom->room_id));
+		json_object_set_new(response, "room", string_ids ? json_string(room_id_str) : json_integer(room_id));
 		json_object_set_new(response, "permanent", save ? json_true() : json_false());
 		/* Also notify event handlers */
 		if(notify_events && gateway->events_is_enabled()) {
 			json_t *info = json_object();
 			json_object_set_new(info, "event", json_string("created"));
-			json_object_set_new(info, "room", string_ids ? json_string(videoroom->room_id_str) : json_integer(videoroom->room_id));
+			json_object_set_new(info, "room", string_ids ? json_string(room_id_str) : json_integer(room_id));
 			gateway->notify_event(&janus_videoroom_plugin, session ? session->handle : NULL, info);
 		}
+		if(room_id_allocated)
+			g_free(room_id_str);
 		goto prepare_response;
 	} else if(!strcasecmp(request_text, "edit")) {
 		/* Edit the properties for an existing VideoRoom */
@@ -6767,6 +6801,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			goto prepare_response;
 		}
 		participant->kicked = TRUE;
+		g_atomic_int_set(&participant->session->starting, 0);
 		g_atomic_int_set(&participant->session->started, 0);
 		/* Prepare an event for this */
 		json_t *kicked = json_object();
@@ -8748,6 +8783,7 @@ void janus_videoroom_setup_media(janus_plugin_session *handle) {
 
 	/* Media relaying can start now */
 	g_atomic_int_set(&session->started, 1);
+	g_atomic_int_set(&session->starting, 0);
 	if(session->participant) {
 		/* If this is a publisher, notify all subscribers about the fact they can
 		 * now subscribe; if this is a subscriber, instead, ask the publisher a FIR */
@@ -9443,6 +9479,7 @@ void janus_videoroom_hangup_media(janus_plugin_session *handle) {
 
 static void janus_videoroom_hangup_media_internal(gpointer session_data) {
 	janus_videoroom_session *session = (janus_videoroom_session *)session_data;
+	g_atomic_int_set(&session->starting, 0);
 	g_atomic_int_set(&session->started, 0);
 	if(!g_atomic_int_compare_and_exchange(&session->hangingup, 0, 1)) {
 		return;
@@ -10884,7 +10921,8 @@ static void *janus_videoroom_handler(void *data) {
 				g_snprintf(error_cause, 512, "Already in as a publisher on this handle");
 				goto error;
 			} else if(!strcasecmp(request_text, "configure") || !strcasecmp(request_text, "publish")) {
-				if(!strcasecmp(request_text, "publish") && g_atomic_int_get(&participant->session->started)) {
+				if(!strcasecmp(request_text, "publish") && (g_atomic_int_get(&participant->session->starting) ||
+						g_atomic_int_get(&participant->session->started))) {
 					janus_refcount_decrease(&participant->ref);
 					JANUS_LOG(LOG_ERR, "Can't publish, already published\n");
 					error_code = JANUS_VIDEOROOM_ERROR_ALREADY_PUBLISHED;
@@ -11312,6 +11350,7 @@ static void *janus_videoroom_handler(void *data) {
 				/* This publisher is leaving, tell everybody */
 				janus_videoroom_leave_or_unpublish(participant, TRUE, FALSE);
 				/* Done */
+				g_atomic_int_set(&session->starting, 0);
 				g_atomic_int_set(&session->started, 0);
 				//~ session->destroy = TRUE;
 			} else {
@@ -12722,6 +12761,7 @@ static void *janus_videoroom_handler(void *data) {
 				json_object_set_new(event, "videoroom", json_string("event"));
 				json_object_set_new(event, "room", string_ids ? json_string(room_id_str) : json_integer(room_id));
 				json_object_set_new(event, "left", json_string("ok"));
+				g_atomic_int_set(&session->starting, 0);
 				g_atomic_int_set(&session->started, 0);
 			} else {
 				JANUS_LOG(LOG_ERR, "Unknown request '%s'\n", request_text);
@@ -12879,19 +12919,21 @@ static void *janus_videoroom_handler(void *data) {
 					g_hash_table_iter_init(&iter, videoroom->participants);
 					while (!g_atomic_int_get(&videoroom->destroyed) && g_hash_table_iter_next(&iter, NULL, &value)) {
 						janus_videoroom_publisher *p = value;
-						if(p != participant && g_atomic_int_get(&p->session->started) && !p->dummy)
+						if(p != participant && !p->dummy &&
+								(g_atomic_int_get(&p->session->starting) || g_atomic_int_get(&p->session->started)))
 							count++;
 					}
 					if(count == videoroom->max_publishers) {
 						janus_mutex_unlock(&videoroom->mutex);
 						janus_refcount_decrease(&videoroom->ref);
 						janus_refcount_decrease(&participant->ref);
-						JANUS_LOG(LOG_ERR, "Maximum number of publishers (%d) already reached\n", videoroom->max_publishers);
+						JANUS_LOG(LOG_ERR, "Maximum number of active publishers (%d) already reached\n", videoroom->max_publishers);
 						error_code = JANUS_VIDEOROOM_ERROR_PUBLISHERS_FULL;
-						g_snprintf(error_cause, 512, "Maximum number of publishers (%d) already reached", videoroom->max_publishers);
+						g_snprintf(error_cause, 512, "Maximum number of active publishers (%d) already reached", videoroom->max_publishers);
 						json_decref(event);
 						goto error;
 					}
+					g_atomic_int_set(&participant->session->starting, 1);
 					janus_mutex_unlock(&videoroom->mutex);
 				}
 				if(videoroom->require_e2ee && !e2ee && !participant->e2ee) {
@@ -13878,7 +13920,8 @@ static int janus_videoroom_create_fd(int port, in_addr_t mcast, const janus_netw
 				} else if(iface->family == AF_INET6) {
 					if(ipv6_disabled) {
 						JANUS_LOG(LOG_ERR, "Can't bind remote publisher to IPv6 address, IPv6 is disabled\n");
-						close(fd);
+						if(fd != -1)
+							close(fd);
 						janus_mutex_unlock(&fd_mutex);
 						return -1;
 					}

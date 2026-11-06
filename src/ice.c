@@ -1449,9 +1449,10 @@ gint janus_ice_handle_attach_plugin(void *core_session, janus_ice_handle *handle
 			} else {
 				janus_refcount_increase(&loop->ref);
 				automatic_selection = FALSE;
+				loop->handles++;
 				handle->mainctx = loop->mainctx;
 				handle->mainloop = loop->mainloop;
-				loop->handles++;
+				handle->static_event_loop = loop;
 				JANUS_LOG(LOG_VERB, "[%"SCNu64"] Manually added handle to loop #%d\n", handle->handle_id, loop->id);
 			}
 		}
@@ -1534,7 +1535,7 @@ gint janus_ice_handle_destroy(void *core_session, janus_ice_handle *handle) {
 		janus_ice_static_event_loop *loop = (janus_ice_static_event_loop *)handle->static_event_loop;
 		loop->handles--;
 		janus_refcount_decrease(&loop->ref);
-		JANUS_LOG(LOG_VERB, "[%"SCNu64"] Manually removed handle from loop #%d\n", handle->handle_id, loop->id);
+		JANUS_LOG(LOG_VERB, "[%"SCNu64"] Removed handle from loop #%d\n", handle->handle_id, loop->id);
 	}
 	janus_mutex_unlock(&event_loops_mutex);
 	janus_plugin *plugin_t = (janus_plugin *)handle->app;
@@ -1612,9 +1613,10 @@ static void janus_ice_cb_agent_closed(GObject *src, GAsyncResult *result, gpoint
 	janus_ice_outgoing_traffic *t = (janus_ice_outgoing_traffic *)data;
 	janus_ice_handle *handle = t->handle;
 
-	JANUS_LOG(LOG_VERB, "[%"SCNu64"] Disposing nice agent %p\n", handle->handle_id, handle->agent);
-	g_object_unref(handle->agent);
-	handle->agent = NULL;
+	JANUS_LOG(LOG_VERB, "[%"SCNu64"] Disposing nice agent %p\n", handle->handle_id, src);
+	if(handle->agent == (NiceAgent *)src)
+		handle->agent = NULL;
+	g_object_unref(src);
 	g_source_unref((GSource *)t);
 	janus_refcount_decrease(&handle->ref);
 }
@@ -3191,7 +3193,6 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 							/* Should we retransmit this packet? */
 							if((p->last_retransmit > 0) && (now-p->last_retransmit < p->current_backoff)) {
 								JANUS_LOG(LOG_HUGE, "[%"SCNu64"]   >> >> Packet %u was retransmitted just %"SCNi64"us ago, skipping\n", handle->handle_id, seqnr, now-p->last_retransmit);
-								g_queue_pop_tail(queue);
 								continue;
 							}
 							in_rb = 1;
@@ -3246,7 +3247,6 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 						if(rtcp_ctx != NULL && in_rb) {
 							g_atomic_int_inc(&rtcp_ctx->nack_count);
 						}
-						g_queue_pop_tail(queue);
 					}
 					medium->retransmit_recent_cnt += retransmits_cnt;
 					/* FIXME Remove the NACK compound packet, we've handled it */
@@ -3701,13 +3701,13 @@ int janus_ice_setup_local(janus_ice_handle *handle, gboolean offer, gboolean tri
 
 	/* Add all local addresses, except those in the ignore list */
 	struct ifaddrs *ifaddr, *ifa;
-	int family, s, n;
+	int family, s;
 	char host[NI_MAXHOST];
 	if(getifaddrs(&ifaddr) == -1) {
 		JANUS_LOG(LOG_ERR, "[%"SCNu64"] Error getting list of interfaces... %d (%s)\n",
 			handle->handle_id, errno, g_strerror(errno));
 	} else {
-		for(ifa = ifaddr, n = 0; ifa != NULL; ifa = ifa->ifa_next, n++) {
+		for(ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
 			if(ifa->ifa_addr == NULL)
 				continue;
 			/* Skip interfaces which are not up and running */
@@ -4166,7 +4166,8 @@ static gboolean janus_ice_outgoing_transport_wide_cc_feedback(gpointer user_data
 	guint32 ssrc_peer = 0;
 	janus_ice_peerconnection_medium *medium = NULL;
 	if(pc) {
-		/* Find inbound video medium */
+		/* Prefer inbound video, falling back to audio if no video has a valid peer SSRC. */
+		janus_ice_peerconnection_medium *audio = NULL;
 		janus_mutex_lock(&handle->mutex);
 		GHashTableIter iter;
 		gpointer value;
@@ -4189,6 +4190,12 @@ static gboolean janus_ice_outgoing_transport_wide_cc_feedback(gpointer user_data
 				if(medium && ssrc_peer)
 					break;
 			}
+			if(audio == NULL && m && m->type == JANUS_MEDIA_AUDIO && m->recv && m->ssrc_peer[0] != 0)
+				audio = m;
+		}
+		if(medium == NULL && audio != NULL) {
+			medium = audio;
+			ssrc_peer = audio->ssrc_peer[0];
 		}
 		janus_mutex_unlock(&handle->mutex);
 	}
@@ -4270,7 +4277,8 @@ static gboolean janus_ice_outgoing_transport_wide_cc_feedback(gpointer user_data
 				medium->ssrc, ssrc_peer, feedback_packet_count, packets_to_process);
 			/* Enqueue it, we'll send it later */
 			if(len > 0) {
-				janus_plugin_rtcp rtcp = { .mindex = medium->mindex, .video = TRUE, .buffer = rtcpbuf, .length = len };
+				janus_plugin_rtcp rtcp = { .mindex = medium->mindex,
+					.video = (medium->type == JANUS_MEDIA_VIDEO), .buffer = rtcpbuf, .length = len };
 				janus_ice_relay_rtcp_internal(handle, medium, &rtcp, FALSE);
 			}
 			if(packets_to_process != packets) {

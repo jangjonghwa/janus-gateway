@@ -249,7 +249,7 @@ char *janus_string_replace(char *message, const char *old_string, const char *ne
 			tmp = strstr(pos, old_string);
 			pos = tmp;
 		}
-		uint16_t old_stringlen = strlen(outgoing)+1, new_stringlen = old_stringlen + diff*counter;
+		size_t old_stringlen = strlen(outgoing)+1, new_stringlen = old_stringlen + diff*counter;
 		if(diff > 0) {	/* Resize now */
 			tmp = g_realloc(outgoing, new_stringlen);
 			outgoing = tmp;
@@ -258,13 +258,13 @@ char *janus_string_replace(char *message, const char *old_string, const char *ne
 		pos = strstr(outgoing, old_string);
 		while(pos) {
 			if(diff > 0) {	/* Move to the right (new_string is larger than old_string) */
-				uint16_t len = strlen(pos)+1;
+				size_t len = strlen(pos)+1;
 				memmove(pos + diff, pos, len);
 				memcpy(pos, new_string, strlen(new_string));
 				pos += strlen(new_string);
 				tmp = strstr(pos, old_string);
 			} else {	/* Move to the left (new_string is smaller than old_string) */
-				uint16_t len = strlen(pos - diff)+1;
+				size_t len = strlen(pos - diff)+1;
 				memmove(pos, pos - diff, len);
 				memcpy(pos, new_string, strlen(new_string));
 				pos += strlen(old_string);
@@ -424,7 +424,7 @@ int janus_get_codec_pt(const char *sdp, const char *codec) {
 	/* Look for the mapping */
 	const char *line = strstr(sdp, video ? "m=video" : "m=audio");
 	while(line) {
-		char *next = strchr(line, '\n');
+		char *next = (char *)strchr(line, '\n');
 		if(next) {
 			*next = '\0';
 			if(strstr(line, "a=rtpmap") && strstr(line, format)) {
@@ -466,7 +466,7 @@ const char *janus_get_codec_from_pt(const char *sdp, int pt) {
 	g_snprintf(rtpmap, 50, "a=rtpmap:%d ", pt);
 	const char *line = strstr(sdp, "m=");
 	while(line) {
-		char *next = strchr(line, '\n');
+		char *next = (char *)strchr(line, '\n');
 		if(next) {
 			*next = '\0';
 			if(strstr(line, rtpmap)) {
@@ -1461,13 +1461,9 @@ size_t janus_gzip_compress(int compression, char *text, size_t tlen, char *compr
 	}
 	/* Deflate the string */
 	res = deflate(&zs, Z_FINISH);
+	(void)deflateEnd(&zs);
 	if(res != Z_STREAM_END) {
 		JANUS_LOG(LOG_ERR, "deflate error: %d\n", res);
-		return 0;
-	}
-	res = deflateEnd(&zs);
-	if(res != Z_OK) {
-		JANUS_LOG(LOG_ERR, "deflateEnd error: %d\n", res);
 		return 0;
 	}
 
